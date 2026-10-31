@@ -178,6 +178,12 @@ td.num,td.mono{white-space:nowrap}
 .login-logo{background:var(--paper);border-radius:10px;padding:14px;display:flex;justify-content:center}
 .login-logo img{width:min(300px,100%);height:auto}
 
+.pw{position:relative;display:block}
+.pw input{padding-right:44px}
+.pw button{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;color:var(--muted);cursor:pointer;padding:6px 8px;border-radius:6px;display:flex}
+.pw button:hover{color:var(--accent)}
+.linkbtn{border:0;background:none;color:var(--accent);cursor:pointer;padding:0;font-weight:600;text-decoration:underline;font-size:.88rem;align-self:flex-start}
+.ok{color:var(--good);font-size:.88rem}
 .login .err{color:var(--bad);font-size:.88rem}
 @media (prefers-reduced-motion:no-preference){.tab,.btn,.res{transition:color .12s,border-color .12s,background .12s}}
 @media print{
@@ -211,7 +217,7 @@ td.num,td.mono{white-space:nowrap}
    Pegá acá la apiKey del proyecto (la misma que usa el Apiario:
    buscá "apiKey" en el index.html del Apiario y copiá el valor).
    ===================================================================== */
-const FIREBASE_API_KEY = "PEGAR_ACA_LA_API_KEY";
+const FIREBASE_API_KEY = "AIzaSyA-BEi9GHk8YP-CThOAdBVTKzL83C43sMk";
 const FIREBASE_PROJECT = "appicultura-1d603";
 
 (function(){
@@ -294,6 +300,18 @@ async function signIn(email,password){
   if(!r.ok){const m=(j.error&&j.error.message)||'';throw new FbErr(/INVALID|PASSWORD|EMAIL_NOT_FOUND|CREDENTIAL/.test(m)?'Email o contraseña incorrectos.':/API key|API_KEY/i.test(m)?'La apiKey no es válida. Revisá que sea la del proyecto del Apiario.':'No se pudo ingresar: '+m,r.status)}
   auth={idToken:j.idToken,refreshToken:j.refreshToken,exp:Date.now()+(+j.expiresIn||3600)*1000,email:j.email,uid:j.localId};LS.set('percha_auth',auth);
 }
+const EYE='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const pwField=(id,label,ac)=>`<label class="f">${label}<span class="pw"><input type="password" id="${id}" autocomplete="${ac}" required><button type="button" data-act="eye" data-for="${id}" aria-label="Mostrar contraseña" title="Mostrar u ocultar">${EYE}</button></span></label>`;
+const authMsg=m=>/INVALID_PASSWORD|INVALID_LOGIN|CREDENTIAL/.test(m)?'La contraseña actual no es correcta.':/WEAK_PASSWORD/.test(m)?'La contraseña nueva es muy corta: tiene que tener al menos 6 caracteres.':/EMAIL_NOT_FOUND/.test(m)?'Ese mail no tiene cuenta en Firebase.':/TOO_MANY/.test(m)?'Demasiados intentos. Esperá unos minutos y probá de nuevo.':/CREDENTIAL_TOO_OLD|LOGIN_AGAIN/.test(m)?'Por seguridad, cerrá sesión, volvé a entrar y probá de nuevo.':'Firebase respondió: '+m;
+async function authPost(path,body){
+  const r=await fetch(`${EP.idt}/${path}?key=${encodeURIComponent(apiKey())}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new FbErr(authMsg((j.error&&j.error.message)||String(r.status)),r.status);return j;
+}
+async function cambiarClave(actual,nueva){
+  const s=await authPost('accounts:signInWithPassword',{email:auth.email,password:actual,returnSecureToken:true});
+  const j=await authPost('accounts:update',{idToken:s.idToken,password:nueva,returnSecureToken:true});
+  auth.idToken=j.idToken||s.idToken;auth.refreshToken=j.refreshToken||s.refreshToken;auth.exp=Date.now()+(+(j.expiresIn||3600))*1000;LS.set('percha_auth',auth);
+}
 async function refresh(){
   const r=await fetch(`${EP.sec}/token?key=${encodeURIComponent(apiKey())}`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&refresh_token='+encodeURIComponent(auth.refreshToken)});
   const j=await r.json().catch(()=>({}));
@@ -374,7 +392,7 @@ async function sync(full){
     if((meta.tienda||'')!==db.tienda){db.tienda=meta.tienda||'';ch=true}
     net='ok';netMsg='';lastSync=new Date();saveLocal();
   }catch(e){
-    if(e instanceof FbErr){net=e.status===403?'err':'off';netMsg=e.status===403?'Firebase no da permiso. Revisá las reglas de Firestore (ver Ajustes).':e.message}
+    if(e instanceof FbErr){net=e.status===403?'err':'off';netMsg=e.status===403?'Firebase no da permiso ('+e.message+'). Revisá las reglas de Firestore.':e.message}
     else{net='off';netMsg='Sin conexión. Los cambios se guardan y se suben solos cuando vuelva internet.'}
   }finally{syncing=false;renderSync();if(ch)onRemote();if(again){again=false;setTimeout(sync,50)}}
   return ch;
@@ -500,12 +518,13 @@ V.login=()=>`<form class="panel login" id="fLogin" autocomplete="on">
   <p class="muted" style="margin:0">Usá la misma cuenta de Firebase que el Apiario. En cada computadora o celular se ingresa una sola vez.</p>
   ${apiKey()?'':`<label class="f">apiKey de Firebase<input id="lk" class="mono" placeholder="AIza…" autocomplete="off"></label><span class="hint">Está en el código del Apiario, en la línea <span class="mono">apiKey</span>. Mejor todavía: pegala arriba de todo en este archivo antes de subirlo a GitHub y no la vas a tener que poner en cada equipo.</span>`}
   <label class="f">Email<input type="email" id="le" autocomplete="username" required></label>
-  <label class="f">Contraseña<input type="password" id="lp" autocomplete="current-password" required></label>
+  ${pwField('lp','Contraseña','current-password')}
+  <button type="button" class="linkbtn" data-act="olvide">Olvidé mi contraseña</button>
   <div class="err" id="lerr"></div>
   <button class="btn pri cobrar" type="submit" id="lbtn">Ingresar</button>
 </form>`;
 AFTER.login=()=>{$('#fLogin').onsubmit=async e=>{e.preventDefault();const k=$('#lk');if(k){if(!k.value.trim()){$('#lerr').textContent='Falta la apiKey.';return}LS.set('percha_apikey',k.value.trim())}
-  const b=$('#lbtn');b.disabled=true;b.textContent='Ingresando…';$('#lerr').textContent='';
+  const b=$('#lbtn');b.disabled=true;b.textContent='Ingresando…';$('#lerr').className='err';$('#lerr').textContent='';
   try{await signIn($('#le').value.trim(),$('#lp').value);loadLocal();$('#main').innerHTML='<div class="empty">Descargando los datos de la tienda…</div>';await sync(true);render()}
   catch(err){$('#lerr').textContent=err instanceof FbErr?err.message:'No hay conexión con Firebase. Revisá internet.';b.disabled=false;b.textContent='Ingresar'}}};
 
@@ -957,12 +976,27 @@ V.datos=()=>{const lg=legacy();return`<div class="vhead"><div><h2>Ajustes</h2><p
   <div>Sesión: <b>${esc(auth.email)}</b> · ${net==='ok'?'<span class="pill good">Sincronizado</span>':net==='err'?'<span class="pill bad">Sin permisos</span>':'<span class="pill warn">Sin conexión</span>'} ${outbox.length?`<span class="pill warn">${outbox.length} cambios por subir</span>`:''}</div>
   ${netMsg?`<div class="hint">${esc(netMsg)}</div>`:''}
   <div class="row"><button class="btn" data-act="sync-full">Volver a descargar todo</button><button class="btn danger" data-act="logout">Cerrar sesión en este equipo</button></div></div>
+ <form class="panel grid" style="gap:12px" id="fClave" autocomplete="off"><h3>Contraseña</h3>
+  <div class="banner" style="margin:0"><span><b>Es la misma cuenta del Apiario.</b> Si la cambiás acá, la contraseña nueva vale para entrar a las dos apps y en todos los equipos.</span></div>
+  <div class="grid g2">${pwField('pwA','Contraseña actual','current-password')}<span></span>${pwField('pwN','Contraseña nueva (mínimo 6)','new-password')}${pwField('pwR','Repetir la nueva','new-password')}</div>
+  <div class="row" style="align-items:center"><button class="btn pri" type="submit" id="pwBtn">Cambiar contraseña</button><span id="pwMsg" class="hint"></span></div>
+ </form>
  ${lg?`<div class="banner"><span>Este navegador tiene datos de la versión anterior (sin nube): <b>${lg.items.filter(i=>!i.demo).length} prendas</b> y <b>${(lg.ventas||[]).filter(v=>!v.demo).length} ventas</b>.</span><button class="btn sm" data-act="up-legacy">Subirlos a la nube</button></div>`:''}
  <div class="panel grid" style="gap:12px"><h3>Copia de seguridad</h3>
   <div class="row"><button class="btn" data-act="exp-json">Descargar copia completa</button><label class="btn">Subir una copia a la nube<input type="file" id="impF" accept=".json,application/json" hidden></label></div>
   <span class="hint">Subir una copia agrega o actualiza prendas, ventas y gastos por su identificador. No borra lo que ya está en la nube.</span></div>
  <div class="panel grid" style="gap:12px"><h3>Exportar a Excel</h3><div class="row"><button class="btn" data-act="exp-csv-stock">Stock (CSV)</button><button class="btn" data-act="exp-csv-ventas">Ventas (CSV)</button></div></div>`};
-AFTER.datos=()=>{$('#impF').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.items))throw 0;
+AFTER.datos=()=>{
+  $('#fClave').onsubmit=async e=>{e.preventDefault();const m=$('#pwMsg'),b=$('#pwBtn');const A=$('#pwA').value,N=$('#pwN').value,R=$('#pwR').value;
+    const err=t=>{m.className='err';m.textContent=t};
+    if(N.length<6)return err('La nueva tiene que tener al menos 6 caracteres.');
+    if(N!==R)return err('La nueva y la repetición no coinciden.');
+    if(N===A)return err('La nueva es igual a la actual.');
+    b.disabled=true;b.textContent='Cambiando…';m.className='hint';m.textContent='';
+    try{await cambiarClave(A,N);$('#fClave').reset();m.className='ok';m.textContent='Listo. Desde ahora entrás con la contraseña nueva (también en el Apiario).';toast('Contraseña cambiada')}
+    catch(x){err(x instanceof FbErr?x.message:'Sin conexión. Probá de nuevo cuando vuelva internet.')}
+    finally{b.disabled=false;b.textContent='Cambiar contraseña'}};
+$('#impF').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.items))throw 0;
   confirmBox('Subir copia','La copia tiene '+d.items.filter(i=>!i.demo).length+' prendas y '+(d.ventas||[]).filter(v=>!v.demo).length+' ventas. Se agregan a la nube.','Subir',()=>uploadData(d),false)}catch(_){toast('Ese archivo no es una copia de Percha',true)}};r.readAsText(f)}};
 async function uploadData(d){
   const nd=x=>!x.demo;const items=(d.items||[]).filter(nd),ventas=(d.ventas||[]).filter(nd),movs=(d.movs||[]).filter(nd),gastos=(d.gastos||[]).filter(nd);
@@ -1042,6 +1076,12 @@ ACT.cam=b=>{const t=b.dataset.target;
 /* ============ eventos globales ============ */
 ACT.tab=(b,e)=>{e&&e.preventDefault&&e.preventDefault();go(b.dataset.t)};
 ACT['modal-close']=closeModal;
+ACT.eye=b=>{const i=$('#'+b.dataset.for);if(!i)return;const show=i.type==='password';i.type=show?'text':'password';b.setAttribute('aria-label',show?'Ocultar contraseña':'Mostrar contraseña');b.style.color=show?'var(--accent)':''};
+ACT.olvide=async()=>{const em=$('#le').value.trim(),m=$('#lerr');
+  if(!em){m.className='err';m.textContent='Escribí tu mail arriba y tocá de nuevo "Olvidé mi contraseña".';$('#le').focus();return}
+  const k=$('#lk');if(k&&k.value.trim())LS.set('percha_apikey',k.value.trim());
+  try{await authPost('accounts:sendOobCode',{requestType:'PASSWORD_RESET',email:em});m.className='ok';m.textContent='Te mandamos un mail a '+em+' para crear una contraseña nueva. Revisá también la carpeta de spam. Ojo: la nueva vale también para el Apiario.'}
+  catch(x){m.className='err';m.textContent=x instanceof FbErr?x.message:'Sin conexión con Firebase.'}};
 ACT.per=b=>{per[b.dataset.v].p=b.dataset.p;render()};
 document.addEventListener('click',e=>{const b=e.target.closest('[data-act]');if(!b||b.disabled)return;const f=ACT[b.dataset.act];if(f)f(b,e)});
 document.addEventListener('change',e=>{const t=e.target;if(t.dataset&&t.dataset.perDate){per[t.dataset.perDate][t.dataset.k]=t.value;render()}});
