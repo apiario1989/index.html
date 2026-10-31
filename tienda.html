@@ -267,7 +267,7 @@ function barcodeSVG(data,maxW,barH,thermal){
 
 /* ============ Firebase (REST, igual que el Apiario) ============ */
 const EP=Object.assign({fs:'https://firestore.googleapis.com/v1',idt:'https://identitytoolkit.googleapis.com/v1',sec:'https://securetoken.googleapis.com/v1'},window.PERCHA_ENDPOINTS||{});
-const COLS={items:'tienda_items',ventas:'tienda_ventas',movs:'tienda_movs',gastos:'tienda_gastos',cola:'tienda_cola'};
+const COLS={items:'tienda_items',ventas:'tienda_ventas',movs:'tienda_movs',gastos:'tienda_gastos',cola:'tienda_cola',caja:'tienda_caja'};
 const META='tienda_meta/config';
 const apiKey=()=>(FIREBASE_API_KEY&&!FIREBASE_API_KEY.startsWith('PEGAR'))?FIREBASE_API_KEY:LS.get('percha_apikey','');
 const docPath=p=>`projects/${FIREBASE_PROJECT}/databases/(default)/documents/${p}`;
@@ -335,10 +335,10 @@ async function fsReq(method,suffix,body,retry=true){
 
 /* ============ datos locales (copia de lo que hay en la nube) ============ */
 let db,outbox=[],cfg;
-const emptyDb=()=>({items:[],ventas:[],movs:[],gastos:[],cola:[],tienda:'',recargo:20,metaUpd:'',since:{items:'',ventas:'',movs:'',gastos:'',cola:''}});
+const emptyDb=()=>({items:[],ventas:[],movs:[],gastos:[],cola:[],caja:[],tienda:'',recargo:20,cuentas:null,mapPago:null,metaUpd:'',since:{items:'',ventas:'',movs:'',gastos:'',cola:'',caja:''}});
 const cacheKey=()=>'percha_cache_'+(auth?auth.uid:'x');
 const outKey=()=>'percha_outbox_'+(auth?auth.uid:'x');
-function loadLocal(){db=Object.assign(emptyDb(),LS.get(cacheKey(),{}));outbox=LS.get(outKey(),[]);
+function loadLocal(){db=Object.assign(emptyDb(),LS.get(cacheKey(),{}));if(!Array.isArray(db.caja))db.caja=[];outbox=LS.get(outKey(),[]);
   cfg=Object.assign({modo:'a4',hoja:'65',start:1,rolloW:40,rolloH:25,info:true,precio:true,custom:{cols:4,rows:10,w:40,h:25,top:10,left:10,hp:45,vp:27}},LS.get('percha_cfg2',{}));if(cfg.v!==2){cfg.precio=true;cfg.info=true;cfg.v=2}}
 function saveLocal(){LS.set(cacheKey(),db);LS.set(outKey(),outbox)}
 const saveCfg=()=>LS.set('percha_cfg2',cfg);
@@ -394,6 +394,8 @@ async function sync(full){
     if(full||meta.upd!==db.metaUpd||!lastSync){for(const k of Object.keys(COLS))ch=(await pullCol(k))||ch;db.metaUpd=meta.upd||''}
     if((meta.tienda||'')!==db.tienda){db.tienda=meta.tienda||'';ch=true}
     if(typeof meta.recargoTarjeta==='number'&&meta.recargoTarjeta!==db.recargo){db.recargo=meta.recargoTarjeta;ch=true}
+    if(Array.isArray(meta.cuentas)&&JSON.stringify(meta.cuentas)!==JSON.stringify(db.cuentas)){db.cuentas=meta.cuentas;ch=true}
+    if(meta.mapPago&&JSON.stringify(meta.mapPago)!==JSON.stringify(db.mapPago)){db.mapPago=meta.mapPago;ch=true}
     net='ok';netMsg='';lastSync=new Date();saveLocal();
   }catch(e){
     if(e instanceof FbErr){net=e.status===403?'err':'off';netMsg=e.status===403?'Firebase no da permiso ('+e.message+'). Revisá las reglas de Firestore.':e.message}
@@ -405,7 +407,7 @@ async function sync(full){
 function onRemote(){
   if(!auth)return;renderChrome();
   if(!$('#modal').hidden)return;
-  if(['ventas','informes','patrimonio'].includes(view))render();
+  if(['ventas','informes','patrimonio','cajas'].includes(view))render();
   else if(view==='stock')renderStock();
   else if(view==='vender'){cart=cart.filter(l=>itemById(l.itemId));renderCart()}
   else if(view==='etiquetas'&&!document.activeElement.closest('#main'))render();
@@ -422,6 +424,16 @@ const recargo=()=>typeof db.recargo==='number'?db.recargo:20;
 /* precio con tarjeta: precio + recargo, redondeado a los $100 */
 const pTarjeta=p=>Math.round((+p||0)*(1+recargo()/100)/100)*100;
 const ES_TARJETA=p=>p==='Débito'||p==='Crédito';
+/* ---- cuentas de dinero ---- */
+const DEF_CUENTAS=[{id:'efectivo',n:'Efectivo'},{id:'mp',n:'Mercado Pago'},{id:'banco',n:'Banco'}];
+const DEF_MAP={'Efectivo':'efectivo','Débito':'banco','Crédito':'banco','Transferencia':'banco','Mercado Pago':'mp','Otro':'efectivo'};
+const cuentas=()=>Array.isArray(db.cuentas)&&db.cuentas.length?db.cuentas:DEF_CUENTAS;
+const cuentaN=id=>(cuentas().find(c=>c.id===id)||{n:id}).n;
+const mapPago=()=>Object.assign({},DEF_MAP,db.mapPago||{});
+const cuentaDe=pago=>mapPago()[pago]||'efectivo';
+const cuentaVenta=v=>v.cuenta||cuentaDe(v.pago);
+const cuentaGasto=g=>g.cuenta||'efectivo';
+const cuentaOpts=sel=>cuentas().map(c=>`<option value="${esc(c.id)}" ${c.id===sel?'selected':''}>${esc(c.n)}</option>`).join('');
 const itemByCode=c=>{c=String(c).trim();return db.items.find(i=>i.code===c)};
 const fullName=it=>it.nombre+(it.color?' · '+it.color:'');
 async function reserveCodes(n){
@@ -456,7 +468,7 @@ async function registrarVenta(lines,desc,descTipo,pago,tarjeta){
   const subtotal=items.reduce((a,l)=>a+l.cant*l.precio,0);
   const rec=tarjeta?items.reduce((a,l)=>a+l.cant*(pTarjeta(l.precio)-l.precio),0):0;const base=subtotal+rec;
   const descMonto=descTipo==='%'?Math.round(base*Math.min(100,desc||0)/100):Math.min(base,+desc||0);
-  const v={id:'v'+uid(),nro,fecha:new Date().toISOString(),items,subtotal,recargo:rec,desc:descMonto,total:base-descMonto,pago,anulada:false,usuario:auth?auth.email:''};
+  const v={id:'v'+uid(),nro,fecha:new Date().toISOString(),items,subtotal,recargo:rec,desc:descMonto,total:base-descMonto,pago,cuenta:cuentaDe(pago),anulada:false,usuario:auth?auth.email:''};
   db.ventas.push(v);w('ventas',v.id,strip(v),{full:true});
   items.forEach(l=>{const it=itemById(l.itemId);it.stock-=l.cant;w('items',it.id,{},{inc:{stock:-l.cant}});addMov({itemId:it.id,tipo:'venta',cant:-l.cant,costo:l.costo,ventaId:v.id})});
   commit();return v;
@@ -465,7 +477,7 @@ const cmv=v=>v.items.reduce((a,l)=>a+l.cant*l.costo,0);
 const ventasEn=(a,b)=>db.ventas.filter(v=>!v.anulada&&new Date(v.fecha)>=a&&new Date(v.fecha)<b);
 
 /* ============ períodos ============ */
-const per={ventas:{p:'mes'},informes:{p:'mes'},gastos:{p:'mes'}};
+const per={cajas:{p:'mes'},ventas:{p:'mes'},informes:{p:'mes'},gastos:{p:'mes'}};
 const PER=[['hoy','Hoy'],['7d','7 días'],['mes','Este mes'],['mesant','Mes anterior'],['anio','Este año'],['todo','Todo'],['rango','Elegir fechas']];
 function rangeOf(st){
   const t=new Date();t.setHours(0,0,0,0);const tm=new Date(t);tm.setDate(t.getDate()+1);
@@ -484,7 +496,7 @@ function perBar(v){const st=per[v];
   ${st.p==='rango'?`<label class="f">Desde<input type="date" id="pd-${v}" value="${st.d||''}" data-per-date="${v}" data-k="d"></label><label class="f">Hasta<input type="date" id="ph-${v}" value="${st.h||''}" data-per-date="${v}" data-k="h"></label>`:''}</div>`}
 
 /* ============ UI base ============ */
-const TABS=[['vender','Vender'],['ingresar','Ingresar mercadería'],['stock','Stock'],['etiquetas','Etiquetas'],['ventas','Ventas'],['informes','Ingresos'],['patrimonio','Patrimonio'],['gastos','Gastos'],['datos','Ajustes']];
+const TABS=[['vender','Vender'],['ingresar','Ingresar mercadería'],['stock','Stock'],['etiquetas','Etiquetas'],['ventas','Ventas'],['cajas','Cajas'],['informes','Ingresos'],['patrimonio','Patrimonio'],['gastos','Gastos'],['datos','Ajustes']];
 let view='vender';
 function go(v){if(!TABS.find(t=>t[0]===v))v='vender';view=v;if(location.hash!=='#'+v)history.replaceState(null,'','#'+v);render();window.scrollTo(0,0)}
 function renderSync(){
@@ -596,7 +608,7 @@ function renderCart(){
   $('#efect').hidden=$('#pago').value!=='Efectivo';
   const pc=numIn($('#pagaCon').value);$('#vuelto').textContent=pc?money(pc-t.tot):'—';
   $('#btnCobrar').disabled=!cart.length||cobrando;$('#btnCobrar').textContent=cobrando?'Registrando…':cart.length?'Cobrar '+money(t.tot):'Cobrar';
-  $('#lastSale').innerHTML=lastSale?`<div class="sold"><b>Venta #${esc(lastSale.nro)} registrada</b><br>${money(lastSale.total)} · ${esc(lastSale.pago)} · ${lastSale.items.reduce((a,l)=>a+l.cant,0)} prenda(s). El stock ya se descontó.</div>`:'';
+  $('#lastSale').innerHTML=lastSale?`<div class="sold"><b>Venta #${esc(lastSale.nro)} registrada</b><br>${money(lastSale.total)} · ${esc(lastSale.pago)} → ${esc(cuentaN(cuentaVenta(lastSale)))} · ${lastSale.items.reduce((a,l)=>a+l.cant,0)} prenda(s). El stock ya se descontó.</div>`:'';
 }
 ACT['cart-add']=b=>{addToCart(itemById(b.dataset.id));$('#scan').value='';$('#scanRes').innerHTML=''};
 ACT['cart-inc']=b=>{const it=itemById(b.dataset.id);const l=cart.find(c=>c.itemId===it.id);if(l.cant>=it.stock){toast('No hay más stock de esa prenda',true);return}l.cant++;renderCart()};
@@ -888,6 +900,96 @@ ACT['venta-anular']=b=>{const v=db.ventas.find(x=>x.id===b.dataset.id);
    v.anulada=true;w('ventas',v.id,{anulada:true});
    v.items.forEach(l=>{const it=itemById(l.itemId);if(it){it.stock+=l.cant;w('items',it.id,{},{inc:{stock:l.cant}});addMov({itemId:it.id,tipo:'anulación',cant:l.cant,costo:l.costo,ventaId:v.id})}});commit();render();toast('Venta anulada y stock devuelto')})};
 
+/* ============ CAJAS ============ */
+/* Línea de tiempo de la plata: ventas (agrupadas por día y cuenta), gastos y movimientos manuales. */
+function movimientos(){
+  const out=[],g={};
+  db.ventas.filter(v=>!v.anulada).forEach(v=>{const c=cuentaVenta(v);const k=dkey(v.fecha)+'|'+c;const o=g[k]||(g[k]={key:k,fecha:v.fecha,cuenta:c,monto:0,n:0,tipo:'ventas'});o.monto+=v.total;o.n++;if(v.fecha>o.fecha)o.fecha=v.fecha});
+  Object.values(g).forEach(o=>out.push({...o,det:`Ventas del día (${o.n})`}));
+  db.gastos.forEach(x=>out.push({fecha:x.fecha,cuenta:cuentaGasto(x),monto:-x.monto,tipo:'gasto',det:'Gasto: '+x.concepto,gid:x.id}));
+  db.caja.forEach(m=>{
+    if(m.tipo==='transferencia'){
+      out.push({fecha:m.fecha,cuenta:m.cuenta,monto:-(m.monto+(m.comision||0)),tipo:'tr-out',det:`Pasaje a ${cuentaN(m.destino)}${m.comision?' (incluye comisión '+money(m.comision)+')':''}${m.nota?' · '+m.nota:''}`,id:m.id});
+      out.push({fecha:m.fecha,cuenta:m.destino,monto:m.monto,tipo:'tr-in',det:`Pasaje desde ${cuentaN(m.cuenta)}${m.nota?' · '+m.nota:''}`,id:m.id});
+    }else{const sg=m.tipo==='egreso'?-1:1;
+      out.push({fecha:m.fecha,cuenta:m.cuenta,monto:sg*m.monto,tipo:m.tipo,det:(m.tipo==='ajuste'?'Conteo de caja (ajuste de saldo)':(m.tipo==='egreso'?'Salida: ':'Entrada: ')+(m.motivo||''))+(m.nota?' · '+m.nota:''),id:m.id})}
+  });
+  return out.sort((a,b)=>a.fecha.localeCompare(b.fecha));
+}
+function saldos(ms){const s={};cuentas().forEach(c=>s[c.id]=0);ms.forEach(m=>{s[m.cuenta]=(s[m.cuenta]||0)+m.monto});return s}
+let cajaFil='todas';
+V.cajas=()=>{
+  const ms=movimientos(),sal=saldos(ms),total=Object.values(sal).reduce((a,b)=>a+b,0);
+  const t=new Date();t.setHours(0,0,0,0);const hoyK=dkey(t);
+  const hoy={};ms.forEach(m=>{if(dkey(m.fecha)===hoyK)hoy[m.cuenta]=(hoy[m.cuenta]||0)+m.monto});
+  const[a,b]=rangeOf(per.cajas);const one=cajaFil!=='todas';
+  let run=0;if(one)ms.forEach(m=>{if(m.cuenta===cajaFil&&new Date(m.fecha)<a)run+=m.monto});
+  const rows=[];ms.forEach(m=>{if(one&&m.cuenta!==cajaFil)return;const d=new Date(m.fecha);if(d<a||d>=b)return;if(one)run+=m.monto;rows.push({...m,saldo:run})});
+  rows.reverse();
+  const extra=Object.keys(sal).filter(k=>!cuentas().find(c=>c.id===k)&&sal[k]);
+  return`<div class="vhead"><div><h2>Cajas</h2><p>Cuánta plata tiene que haber en cada lugar. Las ventas entran solas según el medio de pago y los gastos salen de la cuenta con que los pagaste.</p></div>
+  <div class="row"><button class="btn" data-act="caja-form" data-t="transferencia">⇄ Pasar entre cuentas</button><button class="btn" data-act="caja-form" data-t="ingreso">+ Entrada</button><button class="btn" data-act="caja-form" data-t="egreso">− Salida</button><button class="btn pri" data-act="caja-form" data-t="ajuste">Contar caja</button></div></div>
+  ${!db.caja.length?`<div class="banner"><span><b>Primer paso:</b> cargá cuánta plata hay hoy en cada cuenta. Tocá <b>Contar caja</b>, elegí la cuenta y poné el saldo real. Hacelo con Efectivo, Mercado Pago y Banco.</span><button class="btn sm" data-act="caja-form" data-t="ajuste">Cargar saldos</button></div>`:''}
+  <div class="kpis">
+   <div class="kpi hero"><span class="k">Total en cajas</span><span class="v">${money(total)}</span><span class="s">Suma de todas las cuentas</span></div>
+   ${cuentas().map(c=>`<div class="kpi"><span class="k">${esc(c.n)}</span><span class="v" style="${sal[c.id]<0?'color:var(--bad)':''}">${money(sal[c.id])}</span><span class="s">Hoy ${(hoy[c.id]||0)>=0?'+':'−'} ${money(Math.abs(hoy[c.id]||0))}</span></div>`).join('')}
+   ${extra.map(k=>`<div class="kpi"><span class="k">${esc(k)}</span><span class="v">${money(sal[k])}</span><span class="s">Cuenta que ya no está en la lista</span></div>`).join('')}
+  </div>
+  <div class="row" style="justify-content:space-between">${perBar('cajas')}
+   <div class="row"><label class="f">Cuenta<select id="cajaFil"><option value="todas">Todas</option>${cuentaOpts(cajaFil)}</select></label><button class="btn" data-act="caja-cfg">Cuentas y medios de pago</button><button class="btn" data-act="exp-csv-caja">Exportar (CSV)</button></div></div>
+  <div class="tbl-wrap"><table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Cuenta</th><th class="r">Monto</th>${one?'<th class="r">Saldo</th>':''}<th></th></tr></thead><tbody>
+  ${rows.length?rows.map(m=>`<tr><td class="num">${fdate(m.fecha)}${m.tipo==='ventas'?'':' '+ftime(m.fecha)}</td><td>${esc(m.det)}</td><td>${esc(cuentaN(m.cuenta))}</td>
+    <td class="r num" style="color:${m.monto<0?'var(--bad)':'var(--good)'}">${m.monto<0?'−':'+'} ${money(Math.abs(m.monto))}</td>${one?`<td class="r num">${money(m.saldo)}</td>`:''}
+    <td>${m.id?`<button class="btn sm ghost danger" data-act="caja-del" data-id="${m.id}" aria-label="Borrar movimiento">✕</button>`:m.tipo==='ventas'?'<span class="hint">ver Ventas</span>':'<span class="hint">ver Gastos</span>'}</td></tr>`).join('')
+   :`<tr><td colspan="${one?6:5}" class="empty">No hay movimientos en este período.</td></tr>`}</tbody></table></div>`};
+AFTER.cajas=()=>{$('#cajaFil').onchange=e=>{cajaFil=e.target.value;setTimeout(render)}};
+const MOT_IN=['Aporte del dueño','Cobro de deuda','Otro ingreso'];
+const MOT_OUT=['Pago a proveedor','Retiro del dueño','Gasto del local','Otro'];
+ACT['caja-form']=b=>{const t=b.dataset.t;const sal=saldos(movimientos());const def=t==='transferencia'?'mp':'efectivo';
+  const head={transferencia:['Pasar plata entre cuentas','Por ejemplo, de Mercado Pago al banco, o retirar del banco para tener efectivo.'],ingreso:['Entrada de dinero','Plata que entra al negocio y no es una venta.'],egreso:['Salida de dinero','Plata que sale del negocio. Los gastos del local también quedan anotados en Gastos.'],ajuste:['Contar caja','Poné cuánto hay realmente. La app anota la diferencia con lo que esperaba. Sirve también para cargar el saldo inicial.']}[t];
+  const hoyV=dkey(new Date());
+  let body='';
+  if(t==='transferencia')body=`<div class="grid g2"><label class="f">Desde<select id="cfDe">${cuentaOpts(def)}</select></label><label class="f">Hacia<select id="cfA">${cuentaOpts(cuentas().find(c=>c.id!==def)?.id==='efectivo'?'banco':'banco')}</select></label>
+    <label class="f">Monto que llega<input type="number" min="0" id="cfM"></label><label class="f">Comisión o costo (opcional)<input type="number" min="0" id="cfC" placeholder="0"></label></div>`;
+  else if(t==='ajuste')body=`<div class="grid g2"><label class="f">Cuenta<select id="cfCta">${cuentaOpts('efectivo')}</select></label><div class="f"><span>Según la app</span><b class="num" id="cfEsp" style="font-size:1.2rem;color:var(--ink);text-transform:none">${money(sal.efectivo||0)}</b></div>
+    <label class="f">Lo que hay realmente<input type="number" id="cfM"></label><div class="f"><span>Diferencia</span><b class="num" id="cfDif" style="font-size:1.2rem;text-transform:none">—</b></div></div>`;
+  else body=`<div class="grid g2"><label class="f">Cuenta<select id="cfCta">${cuentaOpts('efectivo')}</select></label><label class="f">Monto<input type="number" min="0" id="cfM"></label>
+    <label class="f">Motivo<select id="cfMot">${(t==='ingreso'?MOT_IN:MOT_OUT).map(x=>`<option>${x}</option>`).join('')}</select></label>
+    ${t==='egreso'?`<label class="f" id="cfCatW" hidden>Categoría del gasto<select id="cfCat">${GCATS.map(c=>`<option>${c}</option>`).join('')}</select></label>`:''}</div>`;
+  modal(`<h3>${head[0]}</h3><p class="muted" style="margin:0">${head[1]}</p>${body}
+   <div class="grid g2"><label class="f">Fecha<input type="date" id="cfF" value="${hoyV}"></label><label class="f">Nota (opcional)<input id="cfN" placeholder="Ej: depósito semanal"></label></div>
+   <div class="err" id="cfErr" style="color:var(--bad);font-size:.88rem"></div>
+   <div class="modal-actions"><button class="btn" data-act="modal-close">Cancelar</button><button class="btn pri" id="cfOk">Guardar</button></div>`,c=>{
+    const fecha=()=>{const v=$('#cfF').value;return v===hoyV?new Date().toISOString():new Date(v+'T12:00').toISOString()};
+    const err=x=>{$('#cfErr').textContent=x};
+    if(t==='ajuste'){const upd=()=>{const e=sal[$('#cfCta').value]||0;$('#cfEsp').textContent=money(e);const r=$('#cfM').value;if(r===''){$('#cfDif').textContent='—';return}const d=numIn(r)-e;$('#cfDif').textContent=(d>=0?'+ ':'− ')+money(Math.abs(d));$('#cfDif').style.color=d<0?'var(--bad)':d>0?'var(--good)':''};$('#cfCta').onchange=upd;$('#cfM').oninput=upd}
+    if(t==='egreso'){const m=$('#cfMot');m.onchange=()=>{$('#cfCatW').hidden=m.value!=='Gasto del local'}}
+    $('#cfOk').onclick=()=>{
+      const nota=$('#cfN').value.trim();const mv={id:'c'+uid(),fecha:fecha(),tipo:t,nota};
+      if(t==='transferencia'){mv.cuenta=$('#cfDe').value;mv.destino=$('#cfA').value;mv.monto=numIn($('#cfM').value);mv.comision=numIn($('#cfC').value);
+        if(mv.cuenta===mv.destino)return err('Elegí dos cuentas distintas.');if(mv.monto<=0)return err('Poné el monto.')}
+      else if(t==='ajuste'){if($('#cfM').value==='')return err('Poné cuánto hay realmente.');mv.cuenta=$('#cfCta').value;mv.monto=Math.round((numIn($('#cfM').value)-(sal[mv.cuenta]||0))*100)/100;if(!mv.monto){closeModal();toast('Está justo: no hay diferencia');return}}
+      else{mv.cuenta=$('#cfCta').value;mv.monto=numIn($('#cfM').value);mv.motivo=$('#cfMot').value;if(mv.monto<=0)return err('Poné el monto.');
+        if(t==='egreso'&&mv.motivo==='Gasto del local'){const g={id:'g'+uid(),fecha:mv.fecha,concepto:nota||$('#cfCat').value,categoria:$('#cfCat').value,cuenta:mv.cuenta,monto:mv.monto};db.gastos.push(g);w('gastos',g.id,strip(g),{full:true});commit();closeModal();render();toast('Gasto anotado y descontado de '+cuentaN(g.cuenta));return}}
+      db.caja.push(mv);w('caja',mv.id,strip(mv),{full:true});commit();closeModal();render();toast('Movimiento guardado')};
+  })};
+ACT['caja-del']=b=>{const m=db.caja.find(x=>x.id===b.dataset.id);if(!m)return;
+  confirmBox('Borrar movimiento','Se borra este movimiento'+(m.tipo==='transferencia'?' (las dos patas del pasaje)':'')+' y se recalculan los saldos.','Borrar',()=>{db.caja=db.caja.filter(x=>x!==m);w('caja',m.id,{borrado:true});commit();render();toast('Movimiento borrado')})};
+ACT['caja-cfg']=()=>{const cs=cuentas().map(c=>({...c}));const mp=mapPago();
+  modal(`<h3>Cuentas y medios de pago</h3><p class="muted" style="margin:0">Los nombres de tus cuentas y a cuál entra la plata de cada medio de pago. Vale para todos los equipos.</p>
+   <div class="grid" style="gap:8px" id="ccList">${cs.map((c,i)=>`<label class="f">Cuenta ${i+1}<input data-cc="${esc(c.id)}" value="${esc(c.n)}"></label>`).join('')}</div>
+   <div class="row"><label class="f grow">Agregar cuenta<input id="ccNew" placeholder="Ej: Banco Nación, Cuenta DNI"></label></div>
+   <h3 style="margin-top:6px">¿A qué cuenta entra cada cobro?</h3>
+   <div class="grid g2">${PAGOS.map(p=>`<label class="f">${p}<select data-mp="${p}">${cuentaOpts(mp[p])}</select></label>`).join('')}</div>
+   <span class="hint">Los cambios valen para las ventas nuevas. Las ventas ya hechas quedan en la cuenta donde entraron.</span>
+   <div class="modal-actions"><button class="btn" data-act="modal-close">Cancelar</button><button class="btn pri" id="ccOk">Guardar</button></div>`,c=>{
+    $('#ccOk',c).onclick=()=>{
+      const nc=cs.map(x=>({id:x.id,n:($(`[data-cc="${x.id}"]`).value||'').trim()||x.n}));
+      const nn=$('#ccNew').value.trim();if(nn)nc.push({id:'k'+uid().slice(-6),n:nn});
+      const nm={};$$('[data-mp]').forEach(s=>nm[s.dataset.mp]=s.value);
+      db.cuentas=nc;db.mapPago=nm;w('meta',null,{cuentas:nc,mapPago:nm});commit();closeModal();render();toast('Guardado')}})};
+ACT['exp-csv-caja']=()=>{const r=[['Fecha','Hora','Movimiento','Cuenta','Monto']];movimientos().forEach(m=>r.push([fdate(m.fecha),ftime(m.fecha),m.det,cuentaN(m.cuenta),m.monto]));download('cajas-'+dkey(new Date())+'.csv',csv(r),'text/csv')};
+
 /* ============ INGRESOS ============ */
 function barChart(buckets){
   const W=720,H=220,pl=58,pb=24,pt=10,max=Math.max(1,...buckets.map(b=>b.v));
@@ -936,6 +1038,7 @@ V.patrimonio=()=>{
   const okV=db.ventas.filter(v=>!v.anulada);const vendido=okV.reduce((s,v)=>s+v.total,0),cmvT=okV.reduce((s,v)=>s+cmv(v),0);
   const perdidas=-db.movs.filter(m=>m.tipo==='ajuste'&&m.cant<0).reduce((s,m)=>s+m.cant*m.costo,0);
   const gastos=db.gastos.reduce((s,g)=>s+g.monto,0);const resAc=vendido-cmvT-gastos-perdidas;
+  const dinero=Object.values(saldos(movimientos())).reduce((a,b)=>a+b,0);
   const cats={};it.forEach(i=>{const c=i.categoria||'Sin categoría';cats[c]=cats[c]||{u:0,c:0,v:0};cats[c].u+=i.stock;cats[c].c+=i.stock*i.costo;cats[c].v+=i.stock*i.precio});
   const lim=new Date();lim.setDate(lim.getDate()-45);
   const lastSale={};db.movs.forEach(m=>{if(m.tipo==='venta'&&m.fecha>(lastSale[m.itemId]||''))lastSale[m.itemId]=m.fecha});
@@ -946,7 +1049,7 @@ V.patrimonio=()=>{
    <div class="kpi hero"><span class="k">Mercadería a costo</span><span class="v">${money(vc)}</span><span class="s">${un} prendas en stock</span></div>
    <div class="kpi"><span class="k">Mercadería a precio de venta</span><span class="v">${money(vv)}</span><span class="s">Si vendieras todo a precio de lista</span></div>
    <div class="kpi"><span class="k">Ganancia potencial</span><span class="v" style="color:var(--good)">${money(vv-vc)}</span><span class="s">${pct(vv?(vv-vc)/vv:NaN)} de margen promedio</span></div>
-   <div class="kpi"><span class="k">Artículos sin stock</span><span class="v">${sinStock}</span><span class="s">Talles o colores agotados</span></div>
+   <div class="kpi"><span class="k">Dinero en cajas</span><span class="v">${money(dinero)}</span><span class="s"><a href="#cajas" data-act="tab" data-t="cajas" style="color:inherit">Ver cajas</a> · ${sinStock} artículos sin stock</span></div>
   </div>
   <div class="panel"><h3>Recorrido de la inversión (histórico)</h3>
    <div class="tbl-wrap" style="border:0"><table><tbody>
@@ -956,10 +1059,11 @@ V.patrimonio=()=>{
     <tr><td class="muted">− Gastos del local</td><td class="r num muted">${money(gastos)}</td></tr>
     <tr><td class="muted">− Pérdidas por fallas y faltantes</td><td class="r num muted">${money(perdidas)}</td></tr>
     <tr><td><b>Resultado acumulado</b></td><td class="r num"><b style="color:${resAc>=0?'var(--good)':'var(--bad)'}">${money(resAc)}</b></td></tr>
-    <tr><td><b>Patrimonio de la tienda</b> <span class="muted">(mercadería a costo + resultado acumulado)</span></td><td class="r num"><b>${money(vc+resAc)}</b></td></tr>
+    <tr><td>Dinero en cajas <span class="muted">(${cuentas().map(c=>esc(c.n)).join(', ')})</span></td><td class="r num">${money(dinero)}</td></tr>
+    <tr><td><b>Patrimonio de la tienda</b> <span class="muted">(mercadería a costo + dinero en cajas)</span></td><td class="r num"><b>${money(vc+dinero)}</b></td></tr>
     <tr><td class="muted">Recupero: ventas sobre lo comprado</td><td class="r num muted">${pct(comprado?vendido/comprado:NaN)}</td></tr>
    </tbody></table></div>
-   <span class="hint">El resultado acumulado no es la plata en caja: no descuenta retiros tuyos ni deudas con proveedores.</span>
+   <span class="hint">El resultado acumulado mide la ganancia del negocio; el dinero en cajas es la plata que hay realmente. Difieren por los pagos a proveedores, tus retiros y los aportes. Para que el dinero sea exacto, cargá los saldos iniciales en Cajas con "Contar caja".</span>
   </div>
   <div class="tbl-wrap"><table><thead><tr><th>Categoría</th><th class="r">Prendas</th><th class="r">A costo</th><th class="r">A venta</th><th class="r">% del capital</th></tr></thead><tbody>
    ${Object.entries(cats).sort((a,b)=>b[1].c-a[1].c).map(([k,o])=>`<tr><td>${esc(k)}</td><td class="r num">${o.u}</td><td class="r num">${money(o.c)}</td><td class="r num">${money(o.v)}</td><td class="r num">${pct(vc?o.c/vc:NaN)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">Sin stock cargado.</td></tr>'}
@@ -975,14 +1079,15 @@ V.gastos=()=>{const[a,b]=rangeOf(per.gastos);const gs=db.gastos.filter(g=>new Da
    <label class="f">Fecha<input type="date" id="g-f" value="${dkey(new Date())}"></label>
    <label class="f grow">Concepto<input id="g-c" placeholder="Ej: Alquiler noviembre" required></label>
    <label class="f">Categoría<select id="g-cat">${GCATS.map(c=>`<option>${c}</option>`).join('')}</select></label>
+   <label class="f">Pagado con<select id="g-cta">${cuentaOpts('efectivo')}</select></label>
    <label class="f">Monto<input type="number" min="0" id="g-m" required placeholder="0"></label>
    <button class="btn pri" type="submit">Agregar gasto</button></form>
   ${perBar('gastos')}
-  <div class="tbl-wrap"><table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th class="r">Monto</th><th></th></tr></thead><tbody>
-   ${gs.length?gs.map(g=>`<tr><td class="num">${fdate(g.fecha)}</td><td>${esc(g.concepto)}</td><td>${esc(g.categoria)}</td><td class="r num">${money(g.monto)}</td><td><button class="btn sm ghost danger" data-act="gasto-del" data-id="${g.id}" aria-label="Borrar">✕</button></td></tr>`).join('')+`<tr><td colspan="3"><b>Total</b></td><td class="r num"><b>${money(gs.reduce((s,g)=>s+g.monto,0))}</b></td><td></td></tr>`
-   :'<tr><td colspan="5" class="empty">No hay gastos en este período.</td></tr>'}</tbody></table></div>`};
+  <div class="tbl-wrap"><table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Pagado con</th><th class="r">Monto</th><th></th></tr></thead><tbody>
+   ${gs.length?gs.map(g=>`<tr><td class="num">${fdate(g.fecha)}</td><td>${esc(g.concepto)}</td><td>${esc(g.categoria)}</td><td>${esc(cuentaN(cuentaGasto(g)))}</td><td class="r num">${money(g.monto)}</td><td><button class="btn sm ghost danger" data-act="gasto-del" data-id="${g.id}" aria-label="Borrar">✕</button></td></tr>`).join('')+`<tr><td colspan="4"><b>Total</b></td><td class="r num"><b>${money(gs.reduce((s,g)=>s+g.monto,0))}</b></td><td></td></tr>`
+   :'<tr><td colspan="6" class="empty">No hay gastos en este período.</td></tr>'}</tbody></table></div>`};
 AFTER.gastos=()=>{$('#fG').onsubmit=e=>{e.preventDefault();const m=numIn($('#g-m').value);if(!m){toast('Poné el monto',true);return}
-  const g={id:'g'+uid(),fecha:new Date($('#g-f').value+'T12:00').toISOString(),concepto:$('#g-c').value.trim(),categoria:$('#g-cat').value,monto:m};
+  const gf=$('#g-f').value;const g={id:'g'+uid(),fecha:gf===dkey(new Date())?new Date().toISOString():new Date(gf+'T12:00').toISOString(),concepto:$('#g-c').value.trim(),categoria:$('#g-cat').value,cuenta:$('#g-cta').value,monto:m};
   db.gastos.push(g);w('gastos',g.id,strip(g),{full:true});commit();render();toast('Gasto agregado')}};
 ACT['gasto-del']=b=>confirmBox('Borrar gasto','Se elimina este gasto de los informes.','Borrar',()=>{db.gastos=db.gastos.filter(g=>g.id!==b.dataset.id);w('gastos',b.dataset.id,{borrado:true});commit();render()});
 
