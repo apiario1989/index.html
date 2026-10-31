@@ -149,11 +149,14 @@ td.num,td.mono{white-space:nowrap}
 .bh .fill{height:100%;background:var(--accent);border-radius:99px}
 .bh .val{text-align:right;font-family:var(--f-mono)}
 
-.lbl{background:#fff;color:#000;font-family:Arial,Helvetica,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;padding:1mm .75mm;line-height:1.05;box-sizing:border-box}
+.lbl{background:#fff;color:#000;font-family:Arial,Helvetica,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;padding:.7mm .8mm;line-height:1.05;box-sizing:border-box}
 .lbl svg{display:block;flex:0 1 auto;min-height:0}
-.lbl .l-code{font-family:"JetBrains Mono",Consolas,"Courier New",monospace;font-size:2.5mm;letter-spacing:.35mm;margin-top:.4mm;white-space:nowrap}
-.lbl .l-info{font-size:2.4mm;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.3mm}
-.lbl .l-info b{font-size:2.7mm}
+.lbl .l-code{font-family:"JetBrains Mono",Consolas,"Courier New",monospace;letter-spacing:.3mm;margin-top:.2mm;white-space:nowrap;line-height:1}
+.lbl .l-top{display:flex;align-items:baseline;gap:1.2mm;width:100%;margin-bottom:.5mm;line-height:1.1}
+.lbl .l-nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.lbl .l-tl{flex:none;white-space:nowrap}
+.lbl .l-tl b{font-size:1.2em}
+.lbl .l-price{white-space:nowrap;margin-top:.5mm;line-height:1.1}
 .lbl-stage{background:var(--sunk);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;align-items:center;gap:8px;overflow:hidden}
 .lbl-stage .zoom{transform:scale(2.4);transform-origin:top center;margin-bottom:calc(var(--zh) * 1.4)}
 .lbl-stage .lbl{outline:1px dashed #b9a99f;box-shadow:0 1px 2px rgba(0,0,0,.15)}
@@ -332,11 +335,11 @@ async function fsReq(method,suffix,body,retry=true){
 
 /* ============ datos locales (copia de lo que hay en la nube) ============ */
 let db,outbox=[],cfg;
-const emptyDb=()=>({items:[],ventas:[],movs:[],gastos:[],cola:[],tienda:'',metaUpd:'',since:{items:'',ventas:'',movs:'',gastos:'',cola:''}});
+const emptyDb=()=>({items:[],ventas:[],movs:[],gastos:[],cola:[],tienda:'',recargo:20,metaUpd:'',since:{items:'',ventas:'',movs:'',gastos:'',cola:''}});
 const cacheKey=()=>'percha_cache_'+(auth?auth.uid:'x');
 const outKey=()=>'percha_outbox_'+(auth?auth.uid:'x');
 function loadLocal(){db=Object.assign(emptyDb(),LS.get(cacheKey(),{}));outbox=LS.get(outKey(),[]);
-  cfg=Object.assign({modo:'a4',hoja:'65',start:1,rolloW:40,rolloH:25,info:true,precio:false,custom:{cols:4,rows:10,w:40,h:25,top:10,left:10,hp:45,vp:27}},LS.get('percha_cfg2',{}));}
+  cfg=Object.assign({modo:'a4',hoja:'65',start:1,rolloW:40,rolloH:25,info:true,precio:true,custom:{cols:4,rows:10,w:40,h:25,top:10,left:10,hp:45,vp:27}},LS.get('percha_cfg2',{}));if(cfg.v!==2){cfg.precio=true;cfg.info=true;cfg.v=2}}
 function saveLocal(){LS.set(cacheKey(),db);LS.set(outKey(),outbox)}
 const saveCfg=()=>LS.set('percha_cfg2',cfg);
 const strip=o=>{const{id,upd,...r}=o;return r};
@@ -390,6 +393,7 @@ async function sync(full){
     const m=await fsReq('GET','/'+META);const meta=m?decF(m.fields||{}):{};
     if(full||meta.upd!==db.metaUpd||!lastSync){for(const k of Object.keys(COLS))ch=(await pullCol(k))||ch;db.metaUpd=meta.upd||''}
     if((meta.tienda||'')!==db.tienda){db.tienda=meta.tienda||'';ch=true}
+    if(typeof meta.recargoTarjeta==='number'&&meta.recargoTarjeta!==db.recargo){db.recargo=meta.recargoTarjeta;ch=true}
     net='ok';netMsg='';lastSync=new Date();saveLocal();
   }catch(e){
     if(e instanceof FbErr){net=e.status===403?'err':'off';netMsg=e.status===403?'Firebase no da permiso ('+e.message+'). Revisá las reglas de Firestore.':e.message}
@@ -414,6 +418,10 @@ function logout(msg){
 /* ============ operaciones del negocio ============ */
 const itemById=id=>db.items.find(i=>i.id===id);
 const tiendaNombre=()=>db.tienda||'Camelias Kids';
+const recargo=()=>typeof db.recargo==='number'?db.recargo:20;
+/* precio con tarjeta: precio + recargo, redondeado a los $100 */
+const pTarjeta=p=>Math.round((+p||0)*(1+recargo()/100)/100)*100;
+const ES_TARJETA=p=>p==='Débito'||p==='Crédito';
 const itemByCode=c=>{c=String(c).trim();return db.items.find(i=>i.code===c)};
 const fullName=it=>it.nombre+(it.color?' · '+it.color:'');
 async function reserveCodes(n){
@@ -442,12 +450,13 @@ function queueLabels(it,n){if(n<=0)return;const q=db.cola.find(c=>c.itemId===it.
 function setLabel(id,n){const q=db.cola.find(c=>c.itemId===id);n=Math.max(0,Math.round(n));
   if(n){if(q)q.cant=n}else db.cola=db.cola.filter(c=>c.itemId!==id);
   w('cola',id,{itemId:id,cant:n,borrado:!n})}
-async function registrarVenta(lines,desc,descTipo,pago){
+async function registrarVenta(lines,desc,descTipo,pago,tarjeta){
   let nro;try{nro=await reserve('ventaSeq',1)}catch(e){nro='SC-'+uid().slice(-4).toUpperCase()}
   const items=lines.map(l=>{const it=itemById(l.itemId);return{itemId:it.id,code:it.code,nombre:it.nombre,talle:it.talle,color:it.color,cant:l.cant,precio:l.precio,costo:it.costo}});
   const subtotal=items.reduce((a,l)=>a+l.cant*l.precio,0);
-  const descMonto=descTipo==='%'?Math.round(subtotal*Math.min(100,desc||0)/100):Math.min(subtotal,+desc||0);
-  const v={id:'v'+uid(),nro,fecha:new Date().toISOString(),items,subtotal,desc:descMonto,total:subtotal-descMonto,pago,anulada:false,usuario:auth?auth.email:''};
+  const rec=tarjeta?items.reduce((a,l)=>a+l.cant*(pTarjeta(l.precio)-l.precio),0):0;const base=subtotal+rec;
+  const descMonto=descTipo==='%'?Math.round(base*Math.min(100,desc||0)/100):Math.min(base,+desc||0);
+  const v={id:'v'+uid(),nro,fecha:new Date().toISOString(),items,subtotal,recargo:rec,desc:descMonto,total:base-descMonto,pago,anulada:false,usuario:auth?auth.email:''};
   db.ventas.push(v);w('ventas',v.id,strip(v),{full:true});
   items.forEach(l=>{const it=itemById(l.itemId);it.stock-=l.cant;w('items',it.id,{},{inc:{stock:-l.cant}});addMov({itemId:it.id,tipo:'venta',cant:-l.cant,costo:l.costo,ventaId:v.id})});
   commit();return v;
@@ -529,7 +538,7 @@ AFTER.login=()=>{$('#fLogin').onsubmit=async e=>{e.preventDefault();const k=$('#
   catch(err){$('#lerr').textContent=err instanceof FbErr?err.message:'No hay conexión con Firebase. Revisá internet.';b.disabled=false;b.textContent='Ingresar'}}};
 
 /* ============ VENDER ============ */
-let cart=[],cartDesc=0,cartDescT='%',cartPago='Efectivo',lastSale=null,cobrando=false;
+let cart=[],cartDesc=0,cartDescT='%',cartPago='Efectivo',cartTarjeta=false,lastSale=null,cobrando=false;
 V.vender=()=>`
 <div class="pos">
   <div style="display:flex;flex-direction:column;gap:12px;min-width:0">
@@ -541,6 +550,7 @@ V.vender=()=>`
   <aside class="panel till">
     <h3>Cobro</h3>
     <div class="line"><span class="muted">Subtotal</span><span class="num" id="tSub"></span></div>
+    <div class="line" id="recLine"><label class="check" style="font-weight:400"><input type="checkbox" id="recT" ${cartTarjeta?'checked':''}> <span class="muted">Recargo tarjeta (+${recargo()} %)</span></label><span class="num" id="tRec"></span></div>
     <div class="line"><span class="muted">Descuento</span><span style="display:flex;gap:6px;width:170px"><input type="number" min="0" id="desc" value="${cartDesc||''}" placeholder="0"><select id="descT" style="width:72px;flex:none"><option ${cartDescT==='%'?'selected':''}>%</option><option ${cartDescT==='$'?'selected':''}>$</option></select></span></div>
     <div class="total"><span class="muted">Total</span><b id="tTot"></b></div>
     <label class="f">Medio de pago<select id="pago">${PAGOS.map(p=>`<option ${p===cartPago?'selected':''}>${p}</option>`).join('')}</select></label>
@@ -555,6 +565,8 @@ AFTER.vender=()=>{
   s.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();scanSubmit(s.value)}});
   s.addEventListener('input',()=>{const q=s.value;if(!q.trim()){$('#scanRes').innerHTML='';return}if(/^\d{6,}$/.test(q.trim()))return;
     $('#scanRes').innerHTML=searchItems(q).map(it=>resBtn(it,'cart-add')).join('')});
+  $('#pago').addEventListener('change',()=>{cartTarjeta=ES_TARJETA($('#pago').value);$('#recT').checked=cartTarjeta;renderCart()});
+  $('#recT').addEventListener('change',()=>{cartTarjeta=$('#recT').checked;renderCart()});
   ['desc','descT','pago','pagaCon'].forEach(id=>$('#'+id).addEventListener('input',()=>{cartDesc=numIn($('#desc').value);cartDescT=$('#descT').value;cartPago=$('#pago').value;renderCart()}));
   renderCart();
 };
@@ -573,14 +585,14 @@ function addToCart(it){
   if(l)l.cant++;else cart.push({itemId:it.id,cant:1,precio:it.precio});
   lastSale=null;renderCart();toast('+ '+it.nombre+' '+(it.talle||''));return true;
 }
-function cartTotals(){const sub=cart.reduce((a,l)=>a+l.cant*l.precio,0);const d=cartDescT==='%'?Math.round(sub*Math.min(100,cartDesc)/100):Math.min(sub,cartDesc);return{sub,d,tot:sub-d}}
+function cartTotals(){const sub=cart.reduce((a,l)=>a+l.cant*l.precio,0);const rec=cartTarjeta?cart.reduce((a,l)=>a+l.cant*(pTarjeta(l.precio)-l.precio),0):0;const base=sub+rec;const d=cartDescT==='%'?Math.round(base*Math.min(100,cartDesc)/100):Math.min(base,cartDesc);return{sub,rec,d,tot:base-d}}
 function renderCart(){
   const b=$('#cartBody');if(!b)return;
   b.innerHTML=cart.length?cart.map(l=>{const it=itemById(l.itemId);return`<tr><td><div class="item-name">${esc(fullName(it))}</div><div class="item-sub mono">${esc(it.code)}</div></td><td>${esc(it.talle||'—')}</td><td class="r num">${money(l.precio)}</td>
     <td><span class="qty"><button data-act="cart-dec" data-id="${it.id}" aria-label="Restar">−</button><span>${l.cant}</span><button data-act="cart-inc" data-id="${it.id}" aria-label="Sumar">+</button></span></td>
     <td class="r num">${money(l.cant*l.precio)}</td><td><button class="btn sm ghost danger" data-act="cart-del" data-id="${it.id}" aria-label="Quitar">✕</button></td></tr>`}).join('')
    :`<tr><td colspan="6" class="empty">Escaneá una etiqueta para empezar la venta.<br><span class="hint">Con lector USB o con la cámara del celular (botón al lado del buscador).</span></td></tr>`;
-  const t=cartTotals();$('#tSub').textContent=money(t.sub);$('#tTot').textContent=money(t.tot);
+  const t=cartTotals();$('#tSub').textContent=money(t.sub);$('#tRec').textContent=t.rec?'+ '+money(t.rec):'';$('#tTot').textContent=money(t.tot);
   $('#efect').hidden=$('#pago').value!=='Efectivo';
   const pc=numIn($('#pagaCon').value);$('#vuelto').textContent=pc?money(pc-t.tot):'—';
   $('#btnCobrar').disabled=!cart.length||cobrando;$('#btnCobrar').textContent=cobrando?'Registrando…':cart.length?'Cobrar '+money(t.tot):'Cobrar';
@@ -592,8 +604,8 @@ ACT['cart-dec']=b=>{const l=cart.find(c=>c.itemId===b.dataset.id);l.cant--;if(l.
 ACT['cart-del']=b=>{cart=cart.filter(c=>c.itemId!==b.dataset.id);renderCart()};
 ACT['cart-clear']=()=>{cart=[];cartDesc=0;$('#desc').value='';$('#pagaCon').value='';renderCart()};
 ACT['cobrar']=async()=>{if(!cart.length||cobrando)return;cobrando=true;renderCart();
-  try{lastSale=await registrarVenta(cart,cartDesc,cartDescT,$('#pago').value);
-    cart=[];cartDesc=0;toast(typeof lastSale.nro==='string'?'Venta guardada sin internet. Se sube sola cuando vuelva la conexión.':'Venta registrada: '+money(lastSale.total),typeof lastSale.nro==='string');}
+  try{lastSale=await registrarVenta(cart,cartDesc,cartDescT,$('#pago').value,cartTarjeta);
+    cart=[];cartDesc=0;cartTarjeta=false;cartPago='Efectivo';$('#pago').value='Efectivo';$('#recT').checked=false;toast(typeof lastSale.nro==='string'?'Venta guardada sin internet. Se sube sola cuando vuelva la conexión.':'Venta registrada: '+money(lastSale.total),typeof lastSale.nro==='string');}
   finally{cobrando=false;if(view==='vender'){$('#desc').value='';$('#pagaCon').value='';renderChrome();renderCart()}}};
 
 /* ============ INGRESAR ============ */
@@ -644,7 +656,7 @@ AFTER.ingresar=()=>{
     $('#varRows').addEventListener('input',e=>{const t=e.target;if(t.dataset.var==null)return;vars[+t.dataset.var][t.dataset.k]=t.dataset.k==='cant'?numIn(t.value):t.value});
     $('#varRows').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.dataset.k==='code')e.preventDefault()});
     const c=$('#n-costo'),r=$('#n-rec'),p=$('#n-precio');
-    const marg=()=>{const co=numIn(c.value),pr=numIn(p.value);$('#n-margen').textContent=pr?'Margen sobre venta: '+pct((pr-co)/pr)+' · Ganás '+money(pr-co)+' por prenda':'Margen: —'};
+    const marg=()=>{const co=numIn(c.value),pr=numIn(p.value);$('#n-margen').textContent=pr?'Con tarjeta: '+money(pTarjeta(pr))+' · Margen '+pct((pr-co)/pr)+' · Ganás '+money(pr-co)+' por prenda':'Margen: —'};
     c.oninput=r.oninput=()=>{const co=numIn(c.value);if(co)p.value=Math.round(co*(1+numIn(r.value)/100)/100)*100;marg()};
     p.oninput=()=>{const co=numIn(c.value),pr=numIn(p.value);if(co)r.value=Math.round((pr/co-1)*100);marg()};
     $('#n-nombre').addEventListener('change',e=>{const ex=db.items.find(i=>i.nombre.toLowerCase()===e.target.value.trim().toLowerCase());if(ex){$('#n-cat').value=ex.categoria;$('#n-marca').value=ex.marca;$('#n-prov').value=ex.proveedor;c.value=ex.costo;p.value=ex.precio;marg()}});
@@ -717,7 +729,7 @@ V.stock=()=>{const tot=db.items.reduce((a,i)=>a+Math.max(0,i.stock),0);
     <label class="f">Categoría<select id="stkCat"><option value="">Todas</option>${[...new Set(db.items.map(i=>i.categoria).filter(Boolean))].sort().map(c=>`<option ${c===stkCat?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
     <div class="seg"><button data-act="stk-fil" data-f="todos" aria-pressed="${stkFil==='todos'}">Todos</button><button data-act="stk-fil" data-f="bajo" aria-pressed="${stkFil==='bajo'}">Quedan pocas</button><button data-act="stk-fil" data-f="sin" aria-pressed="${stkFil==='sin'}">Sin stock</button></div>
   </div>
-  <div class="tbl-wrap"><table><thead><tr><th>Código</th><th>Prenda</th><th>Talle</th><th class="r">Stock</th><th class="r">Costo</th><th class="r">Precio</th><th class="r">Margen</th><th></th></tr></thead><tbody id="stkBody"></tbody></table></div>`};
+  <div class="tbl-wrap"><table><thead><tr><th>Código</th><th>Prenda</th><th>Talle</th><th class="r">Stock</th><th class="r">Costo</th><th class="r">Precio</th><th class="r">Tarjeta</th><th class="r">Margen</th><th></th></tr></thead><tbody id="stkBody"></tbody></table></div>`};
 function renderStock(){
   const b=$('#stkBody');if(!b)return;
   let l=stkQ.trim()?searchItems(stkQ,10000):db.items.slice();
@@ -729,10 +741,10 @@ function renderStock(){
     <td><div class="item-name">${esc(fullName(i))}</div><div class="item-sub">${esc([i.categoria,i.marca].filter(Boolean).join(' · '))}</div></td>
     <td>${esc(i.talle||'—')}</td>
     <td class="r"><span class="pill ${i.stock<=0?'bad':i.stock<=2?'warn':'good'}">${i.stock}</span></td>
-    <td class="r num">${money(i.costo)}</td><td class="r num">${money(i.precio)}</td>
+    <td class="r num">${money(i.costo)}</td><td class="r num">${money(i.precio)}</td><td class="r num muted">${money(pTarjeta(i.precio))}</td>
     <td class="r num">${i.precio?pct((i.precio-i.costo)/i.precio):'—'}</td>
     <td style="white-space:nowrap"><button class="btn sm" data-act="stk-label" data-id="${i.id}">Etiqueta</button> <button class="btn sm" data-act="stk-adj" data-id="${i.id}">Ajustar</button> <button class="btn sm" data-act="stk-edit" data-id="${i.id}">Editar</button></td></tr>`).join('')
-    :`<tr><td colspan="8" class="empty">${db.items.length?'Ninguna prenda coincide con el filtro.':'Todavía no hay mercadería cargada. Empezá en “Ingresar mercadería”.'}</td></tr>`;
+    :`<tr><td colspan="9" class="empty">${db.items.length?'Ninguna prenda coincide con el filtro.':'Todavía no hay mercadería cargada. Empezá en “Ingresar mercadería”.'}</td></tr>`;
 }
 AFTER.stock=()=>{const q=$('#stkQ');q.oninput=()=>{stkQ=q.value;renderStock()};q.onkeydown=e=>{if(e.key==='Enter'){const it=itemByCode(q.value);if(it)ACT['stk-edit']({dataset:{id:it.id}})}};
   $('#stkCat').onchange=e=>{stkCat=e.target.value;renderStock()};renderStock()};
@@ -775,11 +787,17 @@ const perSheet=()=>{const h=hoja();return h.cols*h.rows};
 /* tamaño útil del sticker: nunca más de 40 × 40 mm */
 function stickerBox(){if(cfg.modo==='rollo')return{w:Math.min(40,cfg.rolloW),h:Math.min(40,cfg.rolloH),cw:cfg.rolloW,ch:cfg.rolloH};
   const h=hoja();return{w:Math.min(40,h.w),h:Math.min(40,h.h),cw:h.w,ch:h.h}}
+const moneyL=n=>'$'+Math.round(n||0).toLocaleString('es-AR');
+/* Remera · Talle: 5  /  código de barras  /  Precio: $4.000 - $4.800 */
 function labelHTML(it){
-  const bx=stickerBox();const txt=2.9+(cfg.info?2.9:0)+(cfg.precio&&!cfg.info?2.9:0);
-  const barH=Math.max(6,Math.min(18,bx.h-2-txt));
-  const info=[];if(cfg.info){info.push(`<b>${esc(it.talle||'—')}</b> ${esc(it.nombre)}`)}if(cfg.precio)info.push(`<b>${money(it.precio)}</b>`);
-  return`<div class="lbl" style="width:${bx.w}mm;height:${bx.h}mm">${barcodeSVG(it.code,bx.w-1.5,barH.toFixed(1),cfg.modo==='rollo')}<div class="l-code">${esc(it.code)}</div>${info.length?`<div class="l-info">${info.join(' · ')}</div>`:''}</div>`}
+  const bx=stickerBox();const k=Math.max(1,Math.min(1.35,bx.h/21.2));const W=bx.w-1.6;
+  const fit=(txt,base)=>Math.min(base*k,W/(txt.length*.56)).toFixed(2);   /* achica la letra si el texto es largo */
+  const top=cfg.info?`<div class="l-top" style="font-size:${(2.6*k).toFixed(2)}mm"><span class="l-nm">${esc(it.nombre)}</span><span class="l-tl">Talle: <b>${esc(it.talle||'—')}</b></span></div>`:'';
+  const ptxt=`Precio: ${moneyL(it.precio)} - ${moneyL(pTarjeta(it.precio))}`;
+  const price=cfg.precio?`<div class="l-price" style="font-size:${fit(ptxt,3)}mm">Precio: <b>${moneyL(it.precio)}</b> - <b>${moneyL(pTarjeta(it.precio))}</b></div>`:'';
+  const used=1.4+(cfg.info?3.3*k:0)+2.5*k+(cfg.precio?3.7*k:0);
+  const barH=Math.max(6,Math.min(18,bx.h-used));
+  return`<div class="lbl" style="width:${bx.w}mm;height:${bx.h}mm">${top}${barcodeSVG(it.code,W,barH.toFixed(1),cfg.modo==='rollo')}<div class="l-code" style="font-size:${(2.1*k).toFixed(2)}mm">${esc(it.code)}</div>${price}</div>`}
 const colaOrdenada=()=>db.cola.filter(q=>itemById(q.itemId)).sort((a,b)=>{const x=itemById(a.itemId),y=itemById(b.itemId);return x.nombre.localeCompare(y.nombre)||String(x.color).localeCompare(y.color)||sizeOrd(x.talle)-sizeOrd(y.talle)});
 function sheetMap(){const h=hoja();const st=Math.min(cfg.start,perSheet());let c='';for(let i=1;i<=h.cols*h.rows;i++)c+=`<i class="${i<st?'used':i===st?'next':''}"></i>`;
   return`<div class="sheetmap" style="grid-template-columns:repeat(${h.cols},1fr);grid-template-rows:repeat(${h.rows},1fr)" aria-label="Hoja: empieza en la etiqueta ${st}">${c}</div>`}
@@ -810,8 +828,8 @@ V.etiquetas=()=>{const cola=colaOrdenada();const n=cola.reduce((a,q)=>a+q.cant,0
     :`<div class="grid g2"><label class="f">Ancho del rollo (mm)<input type="number" min="20" max="40" id="cRW" value="${cfg.rolloW}"></label><label class="f">Alto del sticker (mm)<input type="number" min="12" max="40" id="cRH" value="${cfg.rolloH}"></label></div>
       <span class="hint">Medidas comunes de rollo: 40 × 20, 40 × 25 o 40 × 30 mm. En la configuración de la impresora elegí ese mismo tamaño de papel.</span>`}
     <div class="lbl-stage"><span class="hint">Así sale (aumentado). Sticker ${bx.w} × ${bx.h} mm${bx.cw>bx.w?` dentro de una etiqueta de ${bx.cw} mm`:''}</span><div class="zoom" style="--zh:${bx.h}mm">${labelHTML(sample)}</div></div>
-    <label class="check"><input type="checkbox" id="cInfo" ${cfg.info?'checked':''}> Talle y nombre debajo del código <span class="hint">(recomendado)</span></label>
-    <label class="check"><input type="checkbox" id="cPrecio" ${cfg.precio?'checked':''}> Precio</label>
+    <label class="check"><input type="checkbox" id="cInfo" ${cfg.info?'checked':''}> Prenda y talle arriba <span class="hint">(recomendado)</span></label>
+    <label class="check"><input type="checkbox" id="cPrecio" ${cfg.precio?'checked':''}> Precios: efectivo y con tarjeta (+${recargo()} %)</label>
     <span class="hint">Al imprimir: escala 100 % o "Tamaño real", márgenes "Ninguno" y sin encabezados ni pie de página.</span>
    </div>
   </div>`};
@@ -862,7 +880,7 @@ V.ventas=()=>{const[a,b]=rangeOf(per.ventas);const vs=db.ventas.filter(v=>new Da
   <div class="tbl-wrap"><table><thead><tr><th>#</th><th>Fecha</th><th>Prendas</th><th>Pago</th><th class="r">Desc.</th><th class="r">Total</th><th></th></tr></thead><tbody>
   ${vs.length?vs.map(v=>`<tr style="${v.anulada?'opacity:.55':''}"><td class="mono">${esc(v.nro)}</td><td class="num">${fdate(v.fecha)} ${ftime(v.fecha)}</td>
    <td>${v.items.map(l=>`${l.cant}× ${esc(l.nombre)} <span class="muted">${esc(l.talle||'')}</span>`).join('<br>')}</td>
-   <td>${esc(v.pago)}</td><td class="r num">${v.desc?money(v.desc):''}</td><td class="r num"><b>${money(v.total)}</b></td>
+   <td>${esc(v.pago)}</td><td class="r num">${v.desc?money(v.desc):''}</td><td class="r num"><b>${money(v.total)}</b>${v.recargo?`<div class="hint">incluye recargo ${money(v.recargo)}</div>`:''}</td>
    <td>${v.anulada?'<span class="pill bad">Anulada</span>':`<button class="btn sm danger" data-act="venta-anular" data-id="${v.id}">Anular</button>`}</td></tr>`).join('')
    :`<tr><td colspan="7" class="empty">No hay ventas en este período.</td></tr>`}</tbody></table></div>`};
 ACT['venta-anular']=b=>{const v=db.ventas.find(x=>x.id===b.dataset.id);
@@ -971,7 +989,7 @@ ACT['gasto-del']=b=>confirmBox('Borrar gasto','Se elimina este gasto de los info
 /* ============ AJUSTES ============ */
 const legacy=()=>{const d=LS.get('percha_tienda_v1',null);if(!d||!Array.isArray(d.items))return null;const items=d.items.filter(i=>!i.demo);return items.length?d:null};
 V.datos=()=>{const lg=legacy();return`<div class="vhead"><div><h2>Ajustes</h2><p>Los datos viven en Firebase y se comparten entre todos los equipos donde ingreses. Cada equipo guarda además una copia para seguir vendiendo si se corta internet.</p></div></div>
- <div class="panel grid" style="gap:12px"><h3>Tienda</h3><div class="row"><label class="f grow">Nombre de la tienda (para etiquetas sin logo)<input id="cfgT" value="${esc(tiendaNombre())}"></label><button class="btn pri" data-act="cfg-save">Guardar</button></div></div>
+ <div class="panel grid" style="gap:12px"><h3>Tienda</h3><div class="row"><label class="f grow">Nombre de la tienda (para etiquetas sin logo)<input id="cfgT" value="${esc(tiendaNombre())}"></label><label class="f">Recargo con tarjeta %<input type="number" min="0" max="100" step="1" id="cfgR" value="${recargo()}" style="width:120px"></label><button class="btn pri" data-act="cfg-save">Guardar</button></div><span class="hint">El recargo se usa en las etiquetas y se suma solo al cobrar con Débito o Crédito. Se redondea a los $100. Vale para todos los equipos.</span></div>
  <div class="panel grid" style="gap:10px"><h3>Conexión</h3>
   <div>Sesión: <b>${esc(auth.email)}</b> · ${net==='ok'?'<span class="pill good">Sincronizado</span>':net==='err'?'<span class="pill bad">Sin permisos</span>':'<span class="pill warn">Sin conexión</span>'} ${outbox.length?`<span class="pill warn">${outbox.length} cambios por subir</span>`:''}</div>
   ${netMsg?`<div class="hint">${esc(netMsg)}</div>`:''}
@@ -1013,15 +1031,15 @@ async function uploadData(d){
   }catch(e){toast('No se pudo subir: '+(e.message||'sin conexión')+'. Lo pendiente se sube solo cuando vuelva internet.',true);saveLocal()}
 }
 ACT['up-legacy']=()=>{const d=legacy();confirmBox('Subir datos anteriores','Se suben a Firebase las prendas, ventas y gastos que cargaste en este navegador (sin los de ejemplo).','Subir',async()=>{await uploadData(d);LS.set('percha_tienda_v1_subido',true);LS.del('percha_tienda_v1');render()},false)};
-ACT['cfg-save']=()=>{db.tienda=$('#cfgT').value.trim();w('meta',null,{tienda:db.tienda});commit();renderChrome();toast('Guardado')};
+ACT['cfg-save']=()=>{db.tienda=$('#cfgT').value.trim();db.recargo=Math.max(0,Math.min(100,Math.round(numIn($('#cfgR').value))));w('meta',null,{tienda:db.tienda,recargoTarjeta:db.recargo});commit();renderChrome();toast('Guardado')};
 ACT['sync-now']=()=>{sync();toast(net==='ok'?'Sincronizando…':netMsg||'Intentando conectar…',net&&net!=='ok')};
 ACT['sync-full']=async()=>{db.since={items:'',ventas:'',movs:'',gastos:'',cola:''};['items','ventas','movs','gastos','cola'].forEach(k=>db[k]=[]);toast('Descargando…');await sync(true);render()};
 ACT['logout']=()=>confirmBox('Cerrar sesión',outbox.length?'Hay '+outbox.length+' cambios sin subir en este equipo. Si cerrás la sesión ahora se pierden.':'Para volver a usar la tienda en este equipo vas a tener que ingresar de nuevo.','Cerrar sesión',()=>{LS.del(cacheKey());LS.del(outKey());logout()});
 ACT['exp-json']=()=>download('camelias-copia-'+dkey(new Date())+'.json',JSON.stringify({items:db.items,ventas:db.ventas,movs:db.movs,gastos:db.gastos,cfg:{tienda:tiendaNombre()}}),'application/json');
 const csv=rows=>'﻿'+rows.map(r=>r.map(c=>{c=String(c??'');return/[;"\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c}).join(';')).join('\r\n');
 ACT['exp-csv-stock']=()=>download('stock-'+dkey(new Date())+'.csv',csv([['Código','Prenda','Categoría','Marca','Proveedor','Talle','Color','Stock','Costo','Precio','Valor a costo','Valor a venta'],...db.items.map(i=>[i.code,i.nombre,i.categoria,i.marca,i.proveedor,i.talle,i.color,i.stock,i.costo,i.precio,i.stock*i.costo,i.stock*i.precio])]),'text/csv');
-ACT['exp-csv-ventas']=()=>{const r=[['Venta','Fecha','Hora','Pago','Código','Prenda','Talle','Color','Cantidad','Precio unit.','Costo unit.','Desc. venta','Total venta','Estado']];
-  db.ventas.slice().sort((a,b)=>a.fecha.localeCompare(b.fecha)).forEach(v=>v.items.forEach((l,k)=>r.push([v.nro,fdate(v.fecha),ftime(v.fecha),v.pago,l.code,l.nombre,l.talle,l.color,l.cant,l.precio,l.costo,k?'':v.desc,k?'':v.total,v.anulada?'Anulada':'OK'])));
+ACT['exp-csv-ventas']=()=>{const r=[['Venta','Fecha','Hora','Pago','Código','Prenda','Talle','Color','Cantidad','Precio unit.','Costo unit.','Recargo tarjeta','Desc. venta','Total venta','Estado']];
+  db.ventas.slice().sort((a,b)=>a.fecha.localeCompare(b.fecha)).forEach(v=>v.items.forEach((l,k)=>r.push([v.nro,fdate(v.fecha),ftime(v.fecha),v.pago,l.code,l.nombre,l.talle,l.color,l.cant,l.precio,l.costo,k?'':(v.recargo||0),k?'':v.desc,k?'':v.total,v.anulada?'Anulada':'OK'])));
   download('ventas-'+dkey(new Date())+'.csv',csv(r),'text/csv')};
 
 /* ============ CÁMARA ============ */
